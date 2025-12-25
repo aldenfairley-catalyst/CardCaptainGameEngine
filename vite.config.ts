@@ -1,20 +1,9 @@
-import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
-import { fileURLToPath, URL } from 'node:url';
-
-// GitHub Pages uses a sub-path like /<repo-name>/.
-// This makes local dev stay at '/', but CI builds get the right base.
-const repo = process.env.GITHUB_REPOSITORY?.split('/')?.[1];
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
-  base: repo ? `/${repo}/` : '/',
-  resolve: {
-    alias: {
-      '@': fileURLToPath(new URL('./src', import.meta.url))
-    }
-  },
-  server: {
-    port: 5173
-  }
+  // GitHub Pages repo: https://github.com/aldenfairley-catalyst/CardCaptainGameEngine
+  // Site is hosted at: https://aldenfairley-catalyst.github.io/CardCaptainGameEngine/
+  base: "/CardCaptainGameEngine/",
 });
