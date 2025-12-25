@@ -1,3 +1,19 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -5,6 +21,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # IMPORTANT: Do NOT set cache: npm here unless you commit a lockfile.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -15,24 +32,23 @@ jobs:
 
       - name: Diagnostics (repo + env)
         run: |
-          echo "PWD:"
-          pwd
+          echo "PWD:" && pwd
           echo ""
-          echo "Top-level files:"
-          ls -la
+          echo "Top-level files:" && ls -la
           echo ""
-          echo "GitHub workspace:"
-          echo "$GITHUB_WORKSPACE"
+          echo "GitHub workspace:" && echo "$GITHUB_WORKSPACE"
           echo ""
-          echo "Node / npm versions:"
-          node -v
-          npm -v
+          echo "Node / npm versions:" && node -v && npm -v
           echo ""
-          echo "npm cache dir:"
-          npm config get cache
+          echo "npm cache dir:" && npm config get cache
           echo ""
-          echo "Look for lockfiles:"
-          find . -maxdepth 3 -type f \( -name "package-lock.json" -o -name "npm-shrinkwrap.json" -o -name "yarn.lock" -o -name "pnpm-lock.yaml" \) -print
+          echo "Look for lockfiles:" && \
+            find . -maxdepth 3 -type f \( \
+              -name "package-lock.json" -o \
+              -name "npm-shrinkwrap.json" -o \
+              -name "yarn.lock" -o \
+              -name "pnpm-lock.yaml" \
+            \) -print
 
       - name: Detect lockfile
         id: lock
@@ -57,3 +73,27 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Verify build output exists
+        run: |
+          if [ ! -d "dist" ]; then
+            echo "dist/ not found. Check your build output directory."
+            exit 1
+          fi
+          ls -la dist | head -n 200
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
