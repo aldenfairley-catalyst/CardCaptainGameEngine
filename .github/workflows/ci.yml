@@ -1,84 +1,113 @@
-name: CI
+# AI Test and CI/CD Diagnostics Registry
+Version: CJ Docs 1.0 • Updated: 2025-12-26 00:00
 
-on:
-  pull_request:
-  push:
-    branches-ignore: [ main ]
-  workflow_dispatch:
+This document is the “known good” checklist of tests and diagnostic steps that should exist in CI/CD to catch regressions early, especially schema drift, storage drift (wa-sqlite), and GitHub Pages deployment issues.
 
-permissions:
-  contents: read
+## Goals
+1. Catch schema/interface drift between UI ↔ storage ↔ JSON formats.
+2. Provide fast failure with actionable logs (not “mystery TypeScript error”).
+3. Keep GitHub Pages deploy stable even when no lockfile exists.
 
-jobs:
-  build-test:
-    runs-on: ubuntu-latest
+---
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+## CI Pipelines
+### CI (Pull Requests + non-main pushes)
+Primary job: build, lint/test if present, run preflight, print focused diagnostics when builds fail.
 
-      # IMPORTANT: No npm cache unless you commit a lockfile.
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
+Recommended steps:
+- CI Preflight script (repo sanity: package.json, vite config, TS config, workflow assumptions)
+- Lockfile detection (decide between `npm ci` vs `npm install`)
+- Typescript compile
+- Vite build
+- Optional: smoke test for import/export JSON validity
 
-      - name: CI Preflight
-        run: node scripts/ci-preflight.mjs
+---
 
-      - name: Detect lockfile
-        id: lock
-        shell: bash
-        run: |
-          if [ -f "package-lock.json" ] || [ -f "npm-shrinkwrap.json" ]; then
-            echo "has_npm_lock=true" >> $GITHUB_OUTPUT
-          else
-            echo "has_npm_lock=false" >> $GITHUB_OUTPUT
-          fi
+## Diagnostics: What to log and why
+### 1) Environment + repo shape
+Command(s):
+- `pwd`
+- `ls -la`
+- `node -v`
+- `npm -v`
+- `find . -maxdepth 3 -type f (lockfile patterns)`
 
-      - name: Install (npm ci if lockfile exists)
-        if: steps.lock.outputs.has_npm_lock == 'true'
-        run: npm ci
+Why:
+- Confirms workflow is executing in expected directory.
+- Confirms node/npm versions match local.
+- Prevents “cache expects lockfile” failures.
 
-      - name: Install (npm install if no lockfile)
-        if: steps.lock.outputs.has_npm_lock == 'false'
-        run: npm install --no-audit --no-fund
+### 2) Dependency resolution for wa-sqlite
+Command(s):
+- `node -e "print wa-sqlite version from package.json"`
+- `npm ls wa-sqlite || true`
 
-      - name: Lint (if present)
-        run: npm run lint --if-present
+Why:
+- wa-sqlite has multiple builds/entrypoints; version drift can cause typing/runtime differences.
 
-      - name: Test (if present)
-        run: npm run test --if-present
+### 3) Hot-zone file excerpts with line numbers
+Command(s):
+- `nl -ba src/lib/storage.ts | sed -n '1,160p'`
+- `nl -ba src/app/App.tsx | sed -n '1,120p'` (optional)
+- `nl -ba src/features/** | sed -n ...` (optional)
 
-      - name: Diagnostics (env + repo)
-        shell: bash
-        run: |
-          echo "PWD: $(pwd)"
-          echo ""
-          echo "Top-level files:"
-          ls -la
-          echo ""
-          echo "Node / npm:"
-          node -v
-          npm -v
-          echo ""
-          echo "Lockfiles:"
-          find . -maxdepth 3 -type f \( -name "package-lock.json" -o -name "npm-shrinkwrap.json" -o -name "yarn.lock" -o -name "pnpm-lock.yaml" \) -print || true
+Why:
+- When CI reports line numbers, the excerpt makes it immediately debuggable without checking out locally.
 
-      - name: Diagnostics (deps + wa-sqlite + storage hot zone)
-        shell: bash
-        run: |
-          echo "---- wa-sqlite version (from package.json) ----"
-          node -e "const p=require('./package.json'); console.log(p.dependencies?.['wa-sqlite'] || p.devDependencies?.['wa-sqlite'] || 'NOT FOUND');"
-          echo ""
-          echo "---- npm ls wa-sqlite ----"
-          npm ls wa-sqlite || true
-          echo ""
-          echo "---- storage.ts excerpt ----"
-          nl -ba src/lib/storage.ts | sed -n '1,120p' || true
-          echo ""
-          echo "---- tsc version ----"
-          npx tsc -v || true
+### 4) TypeScript version confirmation
+Command(s):
+- `npx tsc -v || true`
 
-      - name: Build
-        run: npm run build
+Why:
+- TS version changes can alter strictness and inferred errors.
+
+---
+
+## Recommended “Preflight” Checks (scripts/ci-preflight.mjs)
+Preflight should validate:
+- package.json exists
+- tsconfig.json exists
+- vite config exists
+- build script exists
+- if GH Pages deploy: base path configured correctly in Vite
+- required workflows exist: ci.yml + deploy-pages.yml
+- storage layer exports methods expected by UI (simple grep-based verification)
+
+---
+
+## Future Tests (Suggested)
+### A) Schema Roundtrip Test (fast)
+Goal:
+- Export all cards/graphs → import them into a fresh store → export again → compare shapes.
+
+### B) Graph Execution Smoke Test
+Goal:
+- Load demo graph → simulate trigger event (hover) → assert runtime emits “emoji spawn” event.
+
+### C) Migration Test
+Goal:
+- Provide an older schema JSON fixture → import → ensure migration runs → validate output schemaVersion.
+
+---
+
+## Known Failure Modes and Fixes
+### Failure: “Dependencies lock file is not found”
+Cause:
+- `actions/setup-node` cache enabled for npm but repo has no package-lock.json.
+
+Fix:
+- Disable npm cache OR commit lockfile OR conditional cache.
+
+### Failure: UI expects `listCards().items` but storage returns array
+Cause:
+- Storage API drift.
+
+Fix:
+- Enforce storage interface with TS types + smoke tests.
+
+### Failure: wa-sqlite TS arity errors
+Cause:
+- wa-sqlite type signatures vary; calling methods with wrong arity triggers TS compile error.
+
+Fix:
+- Use `any` wrapper + `apply(...)` calls in storage.ts to avoid compile-time arity mismatch.
