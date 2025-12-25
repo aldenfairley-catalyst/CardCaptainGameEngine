@@ -50,10 +50,10 @@ function promisifySyncfs(FS: any, populate: boolean): Promise<void> {
 }
 
 /**
- * Very small SQL script splitter for migrations:
- * - Splits on semicolons
- * - Removes comments/empty statements
- * POC-safe: do not use for complex SQL containing semicolons inside strings.
+ * Simple SQL script splitter for POC migrations:
+ * - strips "-- ..." comments
+ * - splits on ";"
+ * POC-safe: avoid semicolons inside string literals.
  */
 function splitSqlScript(script: string): string[] {
   const noLineComments = script
@@ -70,7 +70,7 @@ function splitSqlScript(script: string): string[] {
 export class StorageService {
   private sqlite3: Maybe<any> = null;
   private module: any = null;
-  private db: Maybe<number> = null;
+  private db: Maybe<any> = null;
 
   private idbfsEnabled = false;
   private flushTimer: any = null;
@@ -83,8 +83,8 @@ export class StorageService {
     try {
       const module = await SQLiteESMFactory();
 
-      // Use `any` to avoid typing mismatches between wa-sqlite builds.
-      const sqlite3 = (SQLite as any).Factory(module) as any;
+      // Force `any` to avoid TS signature mismatches across wa-sqlite builds.
+      const sqlite3: any = (SQLite as any).Factory(module);
 
       const FS = module.FS;
 
@@ -107,7 +107,8 @@ export class StorageService {
         this.idbfsEnabled = false;
       }
 
-      const db = await sqlite3.open_v2(DB_FILE);
+      // open_v2 might return a numeric handle or a db object depending on build.
+      const db: any = await sqlite3.open_v2(DB_FILE);
 
       this.sqlite3 = sqlite3;
       this.module = module;
@@ -144,61 +145,128 @@ export class StorageService {
     }, 250);
   }
 
-  // ---------- sqlite helpers (portable) ----------
-  private async run(sql: string, bind?: any[]) {
+  // ---------- wa-sqlite compatibility helpers ----------
+  private getApi() {
     this.assertReady();
-    const sqlite3 = this.sqlite3!;
-    const db = this.db!;
+    return { sqlite3: this.sqlite3 as any, db: this.db as any };
+  }
 
-    const stmt = await sqlite3.statements(db, sql);
-    try {
-      if (bind && bind.length) {
-        await sqlite3.bind_collection(stmt, bind as any);
+  private async prepare(sql: string): Promise<any> {
+    const { sqlite3, db } = this.getApi();
+
+    // Some builds expose: sqlite3.statements(db, sql)
+    if (typeof sqlite3.statements === 'function') {
+      // Avoid TS arg-count checking by staying in `any`.
+      // Try 2-arg first (db, sql), fall back to 1-arg (sql).
+      try {
+        return await sqlite3.statements(db, sql);
+      } catch {
+        return await sqlite3.statements(sql);
       }
+    }
 
+    // Some builds expose: db.statements(sql)
+    if (db && typeof db.statements === 'function') {
+      return await db.statements(sql);
+    }
+
+    // Some builds expose prepare / prepare_v2 variants.
+    if (typeof sqlite3.prepare_v2 === 'function') {
+      try {
+        return await sqlite3.prepare_v2(db, sql);
+      } catch {
+        return await sqlite3.prepare_v2(sql);
+      }
+    }
+
+    if (typeof sqlite3.prepare === 'function') {
+      try {
+        return await sqlite3.prepare(db, sql);
+      } catch {
+        return await sqlite3.prepare(sql);
+      }
+    }
+
+    throw new Error('wa-sqlite: no known prepare/statements method found on this build.');
+  }
+
+  private async finalize(stmt: any) {
+    const { sqlite3 } = this.getApi();
+    if (typeof sqlite3.finalize === 'function') return sqlite3.finalize(stmt);
+    if (stmt && typeof stmt.finalize === 'function') return stmt.finalize();
+  }
+
+  private async bind(stmt: any, bind?: any[]) {
+    const { sqlite3 } = this.getApi();
+    if (!bind || !bind.length) return;
+
+    if (typeof sqlite3.bind_collection === 'function') return sqlite3.bind_collection(stmt, bind);
+    if (stmt && typeof stmt.bind === 'function') return stmt.bind(bind);
+  }
+
+  private async step(stmt: any): Promise<number> {
+    const { sqlite3 } = this.getApi();
+    if (typeof sqlite3.step === 'function') return sqlite3.step(stmt);
+    if (stmt && typeof stmt.step === 'function') return stmt.step();
+    throw new Error('wa-sqlite: no step() available');
+  }
+
+  private async columnNames(stmt: any): Promise<string[]> {
+    const { sqlite3 } = this.getApi();
+    if (typeof sqlite3.column_names === 'function') return sqlite3.column_names(stmt);
+    if (stmt && typeof stmt.column_names === 'function') return stmt.column_names();
+    if (stmt && typeof stmt.columnNames === 'function') return stmt.columnNames();
+    throw new Error('wa-sqlite: no column_names() available');
+  }
+
+  private async column(stmt: any, i: number): Promise<any> {
+    const { sqlite3 } = this.getApi();
+    if (typeof sqlite3.column === 'function') return sqlite3.column(stmt, i);
+    if (stmt && typeof stmt.column === 'function') return stmt.column(i);
+    if (stmt && typeof stmt.get === 'function') return stmt.get(i);
+    throw new Error('wa-sqlite: no column() available');
+  }
+
+  // ---------- sqlite ops ----------
+  private async run(sql: string, bind?: any[]) {
+    const stmt = await this.prepare(sql);
+    try {
+      await this.bind(stmt, bind);
       while (true) {
-        const rc = await sqlite3.step(stmt);
-        if (rc === SQLite.SQLITE_ROW) continue;
+        const rc = await this.step(stmt);
+        if (rc === (SQLite as any).SQLITE_ROW) continue;
         break;
       }
     } finally {
-      await sqlite3.finalize(stmt);
-    }
-  }
-
-  private async execScript(script: string) {
-    const stmts = splitSqlScript(script);
-    for (const s of stmts) {
-      await this.run(s);
+      await this.finalize(stmt);
     }
   }
 
   private async queryAll(sql: string, bind?: any[]) {
-    this.assertReady();
-    const sqlite3 = this.sqlite3!;
-    const db = this.db!;
-
-    const stmt = await sqlite3.statements(db, sql);
+    const stmt = await this.prepare(sql);
     try {
-      if (bind && bind.length) {
-        await sqlite3.bind_collection(stmt, bind as any);
-      }
+      await this.bind(stmt, bind);
 
-      const cols: string[] = await sqlite3.column_names(stmt);
+      const cols = await this.columnNames(stmt);
       const out: any[] = [];
 
-      while ((await sqlite3.step(stmt)) === SQLite.SQLITE_ROW) {
+      while ((await this.step(stmt)) === (SQLite as any).SQLITE_ROW) {
         const row: Record<string, unknown> = {};
         for (let i = 0; i < cols.length; i++) {
-          row[cols[i]] = await sqlite3.column(stmt, i);
+          row[cols[i]] = await this.column(stmt, i);
         }
         out.push(row);
       }
 
       return out;
     } finally {
-      await sqlite3.finalize(stmt);
+      await this.finalize(stmt);
     }
+  }
+
+  private async execScript(script: string) {
+    const stmts = splitSqlScript(script);
+    for (const s of stmts) await this.run(s);
   }
 
   // ---------- migrations ----------
