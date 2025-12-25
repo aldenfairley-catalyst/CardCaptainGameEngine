@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches-ignore: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # IMPORTANT: no cache here unless you commit a lockfile
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: CI Preflight
+        run: node scripts/ci-preflight.mjs
+
+      - name: Detect lockfile
+        id: lock
+        shell: bash
+        run: |
+          if [ -f "package-lock.json" ] || [ -f "npm-shrinkwrap.json" ]; then
+            echo "has_npm_lock=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_npm_lock=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install (npm ci if lockfile exists)
+        if: steps.lock.outputs.has_npm_lock == 'true'
+        run: npm ci
+
+      - name: Install (npm install if no lockfile)
+        if: steps.lock.outputs.has_npm_lock == 'false'
+        run: npm install --no-audit --no-fund
+
+      - name: Lint (if present)
+        run: npm run lint --if-present
+
+      - name: Test (if present)
+        run: npm run test --if-present
+
+      - name: Build
+        run: npm run build
