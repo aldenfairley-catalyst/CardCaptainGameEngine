@@ -1,90 +1,57 @@
 # AI Test and CI/CD Diagnostics Registry
 Version: CJ Docs 1.0 • Updated: 2025-12-25 00:00
 
-This is a living registry of all automated tests, CI checks, and diagnostic steps used in the CJ Forge / CardCaptainGameEngine repo.
-Agents must update this doc whenever they add, remove, or materially change:
-- GitHub Actions workflows
-- npm scripts used by CI
-- test suites, lint rules, typecheck rules
-- diagnostic steps (preflight, environment info, dependency introspection)
+This is a living registry of automated tests, CI checks, and diagnostic steps used in CardCaptainGameEngine.
+Agents must update this doc when changing workflows, build scripts, tests, or diagnostics.
 
 ## Non-negotiables
-1. CI must fail fast with actionable output (not silent “something broke”).
-2. Deploy workflows must never depend on a missing lockfile unless explicitly required.
-3. Typecheck must run in CI for every PR (or equivalent validation must exist).
-4. Diagnostics must help identify: working directory, lockfiles, Node/npm versions, and key deps (wa-sqlite).
+1. CI fails fast with actionable logs.
+2. Deploy does not depend on lockfiles unless explicitly enforced.
+3. Typecheck runs in CI for every PR (or equivalent validation).
+4. Diagnostics must reveal Node/npm versions, working directory, lockfiles, and critical deps (wa-sqlite).
 
-## Registry: Workflows
+## Workflows
 
-| Workflow File | Trigger | Purpose | Fails On | Produces |
-|---|---|---|---|---|
-| .github/workflows/deploy-pages.yml | push to main, manual | Build + deploy to GitHub Pages | Typecheck, build errors | dist artifact + deployed site |
-| .github/workflows/ci.yml | PR, push (non-main), manual | Validate build on changes without deploy | Typecheck/build/test errors | logs |
+| Workflow | File | Trigger | Purpose |
+|---|---|---|---|
+| Pages Deploy | `.github/workflows/deploy-pages.yml` | push to main, manual | Build + deploy GitHub Pages |
+| CI | `.github/workflows/ci.yml` | PR + non-main pushes, manual | Build/test validation without deploy |
 
-## Registry: Required CI Steps
+## Required pipeline phases
 
-| Step Name | Where | Why it exists | Command/Implementation | Expected Output |
-|---|---|---|---|---|
-| Checkout | all workflows | get code | actions/checkout | repo available |
-| Setup Node | all workflows | consistent Node version | actions/setup-node | node installed |
-| CI Preflight | all workflows | fail early if repo layout is wrong | `node scripts/ci-preflight.mjs` | confirms package.json + lockfile presence |
-| Install | all workflows | install deps | `npm ci` if lockfile else `npm install` | node_modules ready |
-| Diagnostics: deps | optional | debug dependency problems | `npm ls wa-sqlite` etc | version visibility |
-| Typecheck | build step | prevent TS regressions | `tsc -p tsconfig.json --noEmit` | TS validation |
-| Lint | optional | catch common issues | `npm run lint --if-present` | lint report |
-| Tests | optional | verify runtime logic | `npm run test --if-present` | test report |
-| Build | deploy + CI | ensure production build passes | `vite build` | dist/ created |
+| Phase | Command/Step | Goal | Typical Failures |
+|---|---|---|---|
+| Preflight | `node scripts/ci-preflight.mjs` | Confirm correct repo layout + lockfile detection | wrong working dir, missing package.json |
+| Install | `npm ci` (if lockfile) else `npm install` | Get deterministic deps when possible | lockfile mismatch, network failures |
+| Typecheck | `tsc -p tsconfig.json --noEmit` | Catch TS errors early | invalid TSX, typing mismatches |
+| Build | `vite build` | Confirm production build works | asset base path, bundler issues |
+| Test | `npm run test --if-present` | Catch runtime regressions | missing deps, failing unit tests |
 
-## Registry: npm Scripts (expected)
+## Diagnostics catalog
 
-| Script | Purpose | Used in CI | Notes |
-|---|---|---:|---|
-| build | typecheck + vite build | Yes | must be deterministic |
-| test | run tests | If present | should be fast |
-| lint | lint code | If present | should be fast |
-| dev | local dev server | No | optional |
-
-## Diagnostics Catalog
-
-### D-001: “No lockfile found” / setup-node cache error
-Symptoms:
-- `Error: Dependencies lock file is not found...`
-Root cause:
-- setup-node configured with `cache: npm` but no lockfile committed at expected location
+### D-001 Lockfile missing but cache enabled
+Symptom:
+- `Dependencies lock file is not found...`
 Fix:
-- Remove caching OR commit lockfile OR use correct cache-dependency-path for monorepos
+- Remove `cache: npm` OR commit `package-lock.json` OR set `cache-dependency-path`.
 
-### D-002: TypeScript “Invalid character” in TSX
-Symptoms:
-- TS1127, TS1381, TS1382 in a TSX file
-Root cause:
-- invalid JSX attribute string escaping (e.g., `placeholder="\"stuff\""` in TSX)
+### D-002 TSX invalid character
+Symptom:
+- TS1127/TS1381/TS1382
+Cause:
+- Incorrect escaping inside TSX attribute strings.
 Fix:
-- Use expression form: `placeholder={'{"x":1}'}`
+- Use expression strings: `placeholder={'{...}'}`.
 
-### D-003: wa-sqlite type mismatch / exec signature mismatch
-Symptoms:
-- TS2305 missing exported members, TS2554 wrong arg count on sqlite calls
-Root cause:
-- wa-sqlite type surface differs between package builds/versions
+### D-003 wa-sqlite signature mismatch
+Symptom:
+- TS2554 “Expected 0-1 arguments, got 2”
+Cause:
+- wa-sqlite builds differ in typed API shape (db handle vs db object methods).
 Fix:
-- Avoid relying on typed `exec(db, sql)`; use prepared statement flow:
-  - `statements(db, sql) → bind_collection → step → finalize`
-- Keep sqlite handle typed as `any` in POC
+- Route calls through compatibility wrappers using `any`, try both call shapes.
 
-## How agents should add new tests/diagnostics
-1. Add the script or workflow step.
-2. Ensure it runs in CI (PR validation or deploy workflow).
-3. Update this registry:
-   - Workflow table
-   - Required steps table
-   - Diagnostics catalog entry if it covers a new failure mode
-
-## Definition of Done for CI/CD changes
-- Workflow passes on a clean clone
-- Clear logs for:
-  - node/npm versions
-  - lockfile detection
-  - key dependency versions (wa-sqlite)
-- Build artifact exists (dist/) for Pages deploy
-- Docs updated (this file + release notes if relevant)
+## How to add new tests/diagnostics
+1. Add the workflow step or npm script.
+2. Ensure it runs on PR CI (preferred).
+3. Document it here (tables + a new diagnostic entry if it’s new failure mode).
