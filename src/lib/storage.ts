@@ -49,6 +49,24 @@ function promisifySyncfs(FS: any, populate: boolean): Promise<void> {
   });
 }
 
+/**
+ * Very small SQL script splitter for migrations:
+ * - Splits on semicolons
+ * - Removes comments/empty statements
+ * POC-safe: do not use for complex SQL containing semicolons inside strings.
+ */
+function splitSqlScript(script: string): string[] {
+  const noLineComments = script
+    .split('\n')
+    .map((line) => line.replace(/--.*$/g, ''))
+    .join('\n');
+
+  return noLineComments
+    .split(';')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 export class StorageService {
   private sqlite3: Maybe<any> = null;
   private module: any = null;
@@ -65,17 +83,17 @@ export class StorageService {
     try {
       const module = await SQLiteESMFactory();
 
-      // Cast Factory to any so TypeScript doesn't lock us to a specific exec signature.
+      // Use `any` to avoid typing mismatches between wa-sqlite builds.
       const sqlite3 = (SQLite as any).Factory(module) as any;
 
       const FS = module.FS;
 
-      // Attempt to enable persistence via Emscripten IDBFS.
+      // Attempt persistence via Emscripten IDBFS (IndexedDB-backed)
       try {
         try {
           FS.mkdir(DB_DIR);
         } catch {
-          // ignore
+          // ignore if exists
         }
 
         try {
@@ -126,12 +144,7 @@ export class StorageService {
     }, 250);
   }
 
-  // ---------- low-level sqlite helpers (portable across wa-sqlite typings) ----------
-  private async execSql(sql: string) {
-    this.assertReady();
-    await this.sqlite3!.exec(this.db!, sql);
-  }
-
+  // ---------- sqlite helpers (portable) ----------
   private async run(sql: string, bind?: any[]) {
     this.assertReady();
     const sqlite3 = this.sqlite3!;
@@ -143,7 +156,6 @@ export class StorageService {
         await sqlite3.bind_collection(stmt, bind as any);
       }
 
-      // Step until DONE (covers DML reliably)
       while (true) {
         const rc = await sqlite3.step(stmt);
         if (rc === SQLite.SQLITE_ROW) continue;
@@ -151,6 +163,13 @@ export class StorageService {
       }
     } finally {
       await sqlite3.finalize(stmt);
+    }
+  }
+
+  private async execScript(script: string) {
+    const stmts = splitSqlScript(script);
+    for (const s of stmts) {
+      await this.run(s);
     }
   }
 
@@ -186,7 +205,7 @@ export class StorageService {
   private async migrate() {
     if (!this.sqlite3 || this.db === null) return;
 
-    await this.execSql(`
+    await this.execScript(`
       PRAGMA foreign_keys = ON;
 
       CREATE TABLE IF NOT EXISTS cards (
@@ -283,13 +302,13 @@ export class StorageService {
   // ---------- Cards ----------
   async listCards(): Promise<ListResult<{ id: string; name: string; updated_at: string }>> {
     if (!this.sqlite3 || this.db === null) return this.listCardsLocal();
-    const rows = await this.queryAll(`SELECT id, name, updated_at FROM cards ORDER BY updated_at DESC;`);
+    const rows = await this.queryAll(`SELECT id, name, updated_at FROM cards ORDER BY updated_at DESC`);
     return { items: rows as any };
   }
 
   async getCard(cardId: string): Promise<Maybe<Card>> {
     if (!this.sqlite3 || this.db === null) return this.getCardLocal(cardId);
-    const rows = await this.queryAll(`SELECT json FROM cards WHERE id = ?;`, [cardId]);
+    const rows = await this.queryAll(`SELECT json FROM cards WHERE id = ?`, [cardId]);
     if (!rows.length) return null;
     return JSON.parse(String((rows[0] as any).json)) as Card;
   }
@@ -313,7 +332,7 @@ export class StorageService {
        ON CONFLICT(id) DO UPDATE SET
          name=excluded.name,
          json=excluded.json,
-         updated_at=excluded.updated_at;`,
+         updated_at=excluded.updated_at`,
       [card2.cardId, card2.name, JSON.stringify(card2), card2.meta.createdAt, card2.meta.updatedAt]
     );
 
@@ -322,20 +341,20 @@ export class StorageService {
 
   async deleteCard(cardId: string): Promise<void> {
     if (!this.sqlite3 || this.db === null) return this.deleteCardLocal(cardId);
-    await this.run(`DELETE FROM cards WHERE id = ?;`, [cardId]);
+    await this.run(`DELETE FROM cards WHERE id = ?`, [cardId]);
     this.scheduleFlush();
   }
 
   // ---------- Graphs ----------
   async listGraphs(): Promise<ListResult<{ id: string; name: string; updated_at: string }>> {
     if (!this.sqlite3 || this.db === null) return this.listGraphsLocal();
-    const rows = await this.queryAll(`SELECT id, name, updated_at FROM graphs ORDER BY updated_at DESC;`);
+    const rows = await this.queryAll(`SELECT id, name, updated_at FROM graphs ORDER BY updated_at DESC`);
     return { items: rows as any };
   }
 
   async getGraph(graphId: string): Promise<Maybe<ActionGraph>> {
     if (!this.sqlite3 || this.db === null) return this.getGraphLocal(graphId);
-    const rows = await this.queryAll(`SELECT json FROM graphs WHERE id = ?;`, [graphId]);
+    const rows = await this.queryAll(`SELECT json FROM graphs WHERE id = ?`, [graphId]);
     if (!rows.length) return null;
     return JSON.parse(String((rows[0] as any).json)) as ActionGraph;
   }
@@ -359,7 +378,7 @@ export class StorageService {
        ON CONFLICT(id) DO UPDATE SET
          name=excluded.name,
          json=excluded.json,
-         updated_at=excluded.updated_at;`,
+         updated_at=excluded.updated_at`,
       [graph2.graphId, graph2.name, JSON.stringify(graph2), graph2.meta.createdAt, graph2.meta.updatedAt]
     );
 
@@ -368,7 +387,7 @@ export class StorageService {
 
   async deleteGraph(graphId: string): Promise<void> {
     if (!this.sqlite3 || this.db === null) return this.deleteGraphLocal(graphId);
-    await this.run(`DELETE FROM graphs WHERE id = ?;`, [graphId]);
+    await this.run(`DELETE FROM graphs WHERE id = ?`, [graphId]);
     this.scheduleFlush();
   }
 
