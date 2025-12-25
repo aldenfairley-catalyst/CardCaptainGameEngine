@@ -11,17 +11,18 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  group: "pages"
   cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # IMPORTANT: Do NOT set cache: npm here unless you commit a lockfile.
+      # If you commit package-lock.json, you can enable cache: 'npm' safely.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -29,26 +30,6 @@ jobs:
 
       - name: CI Preflight
         run: node scripts/ci-preflight.mjs
-
-      - name: Diagnostics (repo + env)
-        run: |
-          echo "PWD:" && pwd
-          echo ""
-          echo "Top-level files:" && ls -la
-          echo ""
-          echo "GitHub workspace:" && echo "$GITHUB_WORKSPACE"
-          echo ""
-          echo "Node / npm versions:" && node -v && npm -v
-          echo ""
-          echo "npm cache dir:" && npm config get cache
-          echo ""
-          echo "Look for lockfiles:" && \
-            find . -maxdepth 3 -type f \( \
-              -name "package-lock.json" -o \
-              -name "npm-shrinkwrap.json" -o \
-              -name "yarn.lock" -o \
-              -name "pnpm-lock.yaml" \
-            \) -print
 
       - name: Detect lockfile
         id: lock
@@ -68,34 +49,13 @@ jobs:
         if: steps.lock.outputs.has_npm_lock == 'false'
         run: npm install --no-audit --no-fund
 
-      - name: Test (if present)
-        run: npm run test --if-present
-      - name: Diagnostics (wa-sqlite + storage excerpt)
-        run: |
-          echo "---- wa-sqlite version (from package.json) ----"
-          node -e "const p=require('./package.json'); console.log(p.dependencies?.['wa-sqlite'] || p.devDependencies?.['wa-sqlite'] || 'NOT FOUND')"
-          echo ""
-          echo "---- npm ls wa-sqlite ----"
-          npm ls wa-sqlite || true
-
-          echo ""
-          echo "---- wa-sqlite type signatures (grep) ----"
-          grep -R "statements" node_modules/wa-sqlite -n | head -n 40 || true
-          grep -R "open_v2" node_modules/wa-sqlite -n | head -n 40 || true
-
-          echo ""
-          echo "---- storage.ts excerpt (line numbers) ----"
-          nl -ba src/lib/storage.ts | sed -n '200,280p' || true
       - name: Build
         run: npm run build
 
-      - name: Verify build output exists
-        run: |
-          if [ ! -d "dist" ]; then
-            echo "dist/ not found. Check your build output directory."
-            exit 1
-          fi
-          ls -la dist | head -n 200
+      # If you use Vite with base path for GH Pages, ensure vite.config.ts has base set.
+      # The app should output to dist/ (default for Vite).
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
@@ -103,12 +63,13 @@ jobs:
           path: dist
 
   deploy:
-    needs: build
     runs-on: ubuntu-latest
+    needs: build
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+
     steps:
-      - name: Deploy
+      - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
