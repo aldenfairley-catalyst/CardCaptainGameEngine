@@ -21,14 +21,53 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # IMPORTANT: No cache here, because setup-node cache requires a lockfile.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: "20"
 
-      - name: Install
+      - name: Diagnostics (repo + env)
+        run: |
+          echo "PWD:"
+          pwd
+          echo ""
+          echo "Top-level files:"
+          ls -la
+          echo ""
+          echo "GitHub workspace:"
+          echo "$GITHUB_WORKSPACE"
+          echo ""
+          echo "Node / npm versions:"
+          node -v
+          npm -v
+          echo ""
+          echo "npm cache dir:"
+          npm config get cache
+          echo ""
+          echo "Look for lockfiles:"
+          find . -maxdepth 3 -type f \( -name "package-lock.json" -o -name "npm-shrinkwrap.json" -o -name "yarn.lock" -o -name "pnpm-lock.yaml" \) -print
+
+      - name: Detect lockfile
+        id: lock
+        shell: bash
+        run: |
+          if [ -f "package-lock.json" ] || [ -f "npm-shrinkwrap.json" ]; then
+            echo "has_npm_lock=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_npm_lock=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install (npm ci if lockfile exists)
+        if: steps.lock.outputs.has_npm_lock == 'true'
         run: npm ci
+
+      - name: Install (npm install if no lockfile)
+        if: steps.lock.outputs.has_npm_lock == 'false'
+        run: npm install --no-audit --no-fund
+
+      - name: Test (if present)
+        run: npm run test --if-present
 
       - name: Build
         run: npm run build
