@@ -1,0 +1,340 @@
+{
+  "schemaVersion": "CJ-GRAPH-0.1",
+  "graphId": "graph_demo_hover_emoji",
+  "name": "Hover → Flying Emoji (POC)",
+  "description": "Listens for a mouseover on a UI target and launches a large emoji across the screen.",
+  "createdAt": "2025-12-24T08:30:00.000Z",
+  "updatedAt": "2025-12-24T08:30:00.000Z",
+  "nodes": [
+    {
+      "id": "n_listener",
+      "type": "event.uiHover",
+      "title": "UI Hover Listener",
+      "color": "#2b64ff",
+      "position": { "x": 60, "y": 90 },
+      "ports": [
+        {
+          "id": "exec_out",
+          "name": "trigger",
+          "kind": "exec",
+          "direction": "out",
+          "side": "right",
+          "slot": 0,
+          "shape": "triangle",
+          "color": "#6dd6ff"
+        },
+        {
+          "id": "data_out_event",
+          "name": "event",
+          "kind": "data",
+          "direction": "out",
+          "side": "right",
+          "slot": 3,
+          "dataType": "json",
+          "shape": "circle",
+          "color": "#6bff95"
+        }
+      ],
+      "config": { "selector": "#hoverTarget", "eventType": "mouseover" }
+    },
+    {
+      "id": "n_uiRoot",
+      "type": "tool.uiRoot",
+      "title": "UI Root",
+      "color": "#8035ff",
+      "position": { "x": 60, "y": 290 },
+      "ports": [
+        {
+          "id": "tool_out",
+          "name": "uiRoot",
+          "kind": "tool",
+          "direction": "out",
+          "side": "bottom",
+          "slot": 0,
+          "shape": "diamond",
+          "color": "#d3a4ff"
+        }
+      ],
+      "config": { "mountId": "cj-ui-overlay" }
+    },
+    {
+      "id": "n_emoji",
+      "type": "data.constString",
+      "title": "Const String",
+      "color": "#136c32",
+      "position": { "x": 360, "y": 320 },
+      "ports": [
+        {
+          "id": "data_out",
+          "name": "value",
+          "kind": "data",
+          "direction": "out",
+          "side": "right",
+          "slot": 3,
+          "dataType": "string",
+          "shape": "circle",
+          "color": "#6bff95"
+        }
+      ],
+      "config": { "value": "🚀" }
+    },
+    {
+      "id": "n_size",
+      "type": "data.constNumber",
+      "title": "Const Number",
+      "color": "#136c32",
+      "position": { "x": 360, "y": 410 },
+      "ports": [
+        {
+          "id": "data_out",
+          "name": "value",
+          "kind": "data",
+          "direction": "out",
+          "side": "right",
+          "slot": 3,
+          "dataType": "number",
+          "shape": "circle",
+          "color": "#6bff95"
+        }
+      ],
+      "config": { "value": 120 }
+    },
+    {
+      "id": "n_spawn",
+      "type": "ui.spawnEmoji",
+      "title": "Spawn Emoji",
+      "color": "#ff2fae",
+      "position": { "x": 650, "y": 160 },
+      "ports": [
+        {
+          "id": "exec_in",
+          "name": "in",
+          "kind": "exec",
+          "direction": "in",
+          "side": "left",
+          "slot": 0,
+          "shape": "triangle",
+          "color": "#6dd6ff"
+        },
+        {
+          "id": "exec_out",
+          "name": "out",
+          "kind": "exec",
+          "direction": "out",
+          "side": "right",
+          "slot": 0,
+          "shape": "triangle",
+          "color": "#6dd6ff"
+        },
+        {
+          "id": "data_in_emoji",
+          "name": "emoji",
+          "kind": "data",
+          "direction": "in",
+          "side": "left",
+          "slot": 3,
+          "dataType": "string",
+          "shape": "circle",
+          "color": "#6bff95"
+        },
+        {
+          "id": "data_in_size",
+          "name": "sizePx",
+          "kind": "data",
+          "direction": "in",
+          "side": "left",
+          "slot": 4,
+          "dataType": "number",
+          "shape": "circle",
+          "color": "#6bff95"
+        },
+        {
+          "id": "data_in_event",
+          "name": "event",
+          "kind": "data",
+          "direction": "in",
+          "side": "left",
+          "slot": 5,
+          "dataType": "json",
+          "shape": "circle",
+          "color": "#6bff95"
+        },
+        {
+          "id": "tool_in",
+          "name": "uiRoot",
+          "kind": "tool",
+          "direction": "in",
+          "side": "bottom",
+          "slot": 0,
+          "shape": "diamond",
+          "color": "#d3a4ff"
+        },
+        {
+          "id": "data_out_el",
+          "name": "element",
+          "kind": "data",
+          "direction": "out",
+          "side": "right",
+          "slot": 3,
+          "dataType": "domElement",
+          "shape": "circle",
+          "color": "#6bff95"
+        }
+      ],
+      "config": { "defaultEmoji": "🔥", "defaultSizePx": 96 }
+    },
+    {
+      "id": "n_anim",
+      "type": "ui.animateFly",
+      "title": "Animate Fly",
+      "color": "#ff2fae",
+      "position": { "x": 960, "y": 160 },
+      "ports": [
+        {
+          "id": "exec_in",
+          "name": "in",
+          "kind": "exec",
+          "direction": "in",
+          "side": "left",
+          "slot": 0,
+          "shape": "triangle",
+          "color": "#6dd6ff"
+        },
+        {
+          "id": "exec_out",
+          "name": "out",
+          "kind": "exec",
+          "direction": "out",
+          "side": "right",
+          "slot": 0,
+          "shape": "triangle",
+          "color": "#6dd6ff"
+        },
+        {
+          "id": "data_in_el",
+          "name": "element",
+          "kind": "data",
+          "direction": "in",
+          "side": "left",
+          "slot": 3,
+          "dataType": "domElement",
+          "shape": "circle",
+          "color": "#6bff95"
+        },
+        {
+          "id": "data_out_el",
+          "name": "element",
+          "kind": "data",
+          "direction": "out",
+          "side": "right",
+          "slot": 3,
+          "dataType": "domElement",
+          "shape": "circle",
+          "color": "#6bff95"
+        }
+      ],
+      "config": { "toX": 800, "toY": -200, "durationMs": 900, "scale": 1.6 }
+    },
+    {
+      "id": "n_remove",
+      "type": "ui.removeElement",
+      "title": "Remove Element",
+      "color": "#ff2fae",
+      "position": { "x": 1250, "y": 160 },
+      "ports": [
+        {
+          "id": "exec_in",
+          "name": "in",
+          "kind": "exec",
+          "direction": "in",
+          "side": "left",
+          "slot": 0,
+          "shape": "triangle",
+          "color": "#6dd6ff"
+        },
+        {
+          "id": "exec_out",
+          "name": "out",
+          "kind": "exec",
+          "direction": "out",
+          "side": "right",
+          "slot": 0,
+          "shape": "triangle",
+          "color": "#6dd6ff"
+        },
+        {
+          "id": "data_in_el",
+          "name": "element",
+          "kind": "data",
+          "direction": "in",
+          "side": "left",
+          "slot": 3,
+          "dataType": "domElement",
+          "shape": "circle",
+          "color": "#6bff95"
+        }
+      ],
+      "config": {}
+    }
+  ],
+  "edges": [
+    {
+      "id": "e_exec_1",
+      "kind": "exec",
+      "from": { "nodeId": "n_listener", "portId": "exec_out" },
+      "to": { "nodeId": "n_spawn", "portId": "exec_in" }
+    },
+    {
+      "id": "e_exec_2",
+      "kind": "exec",
+      "from": { "nodeId": "n_spawn", "portId": "exec_out" },
+      "to": { "nodeId": "n_anim", "portId": "exec_in" }
+    },
+    {
+      "id": "e_exec_3",
+      "kind": "exec",
+      "from": { "nodeId": "n_anim", "portId": "exec_out" },
+      "to": { "nodeId": "n_remove", "portId": "exec_in" }
+    },
+    {
+      "id": "e_data_emoji",
+      "kind": "data",
+      "from": { "nodeId": "n_emoji", "portId": "data_out" },
+      "to": { "nodeId": "n_spawn", "portId": "data_in_emoji" }
+    },
+    {
+      "id": "e_data_size",
+      "kind": "data",
+      "from": { "nodeId": "n_size", "portId": "data_out" },
+      "to": { "nodeId": "n_spawn", "portId": "data_in_size" }
+    },
+    {
+      "id": "e_data_event",
+      "kind": "data",
+      "from": { "nodeId": "n_listener", "portId": "data_out_event" },
+      "to": { "nodeId": "n_spawn", "portId": "data_in_event" }
+    },
+    {
+      "id": "e_tool_root",
+      "kind": "tool",
+      "from": { "nodeId": "n_uiRoot", "portId": "tool_out" },
+      "to": { "nodeId": "n_spawn", "portId": "tool_in" }
+    },
+    {
+      "id": "e_data_el_1",
+      "kind": "data",
+      "from": { "nodeId": "n_spawn", "portId": "data_out_el" },
+      "to": { "nodeId": "n_anim", "portId": "data_in_el" }
+    },
+    {
+      "id": "e_data_el_2",
+      "kind": "data",
+      "from": { "nodeId": "n_anim", "portId": "data_out_el" },
+      "to": { "nodeId": "n_remove", "portId": "data_in_el" }
+    }
+  ],
+  "meta": {
+    "tags": ["poc", "demo", "ui"],
+    "editor": { "grid": 16, "snap": true }
+  }
+}

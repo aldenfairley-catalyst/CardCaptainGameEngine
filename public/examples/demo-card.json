@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "CJ-0.1",
+  "cardId": "card_demo_emoji",
+  "name": "Emoji Cannon (Demo)",
+  "description": "Hover the preview target to launch a ridiculous emoji across the screen.",
+  "tags": ["demo", "ui", "listener"],
+  "actions": [
+    {
+      "actionId": "action_demo_emoji",
+      "name": "Hover Emoji Action",
+      "graphId": "graph_demo_hover_emoji"
+    }
+  ],
+  "createdAt": "2025-12-24T08:30:00.000Z",
+  "updatedAt": "2025-12-24T08:30:00.000Z"
+}
