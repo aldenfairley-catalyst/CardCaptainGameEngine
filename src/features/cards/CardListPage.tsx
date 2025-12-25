@@ -84,7 +84,11 @@ export default function CardListPage() {
         </div>
       </div>
 
-      {err ? <div className="panel" style={{ padding: 12, borderColor: 'rgba(255,92,122,0.35)' }}>{err}</div> : null}
+      {err ? (
+        <div className="panel" style={{ padding: 12, borderColor: 'rgba(255,92,122,0.35)' }}>
+          {err}
+        </div>
+      ) : null}
 
       <div className="panel" style={{ padding: 12 }}>
         {loading ? (
@@ -124,7 +128,13 @@ export default function CardListPage() {
             <div className="small">
               Paste an export object shaped like: <span className="kbd">&#123; cards: [...], graphs: [...] &#125;</span>
             </div>
-            <textarea value={importText} onChange={(e) => setImportText(e.target.value)} placeholder="{\n  \"cards\": [...],\n  \"graphs\": [...]\n}" />
+
+            <textarea
+              value={importText}
+              onChange={(e) => setImportText(e.target.value)}
+              placeholder={'{\n  "cards": [...],\n  "graphs": [...]\n}'}
+            />
+
             <div className="row" style={{ justifyContent: 'flex-end' }}>
               <button onClick={() => setShowImport(false)}>Cancel</button>
               <button disabled={!canImport} onClick={doImport}>
