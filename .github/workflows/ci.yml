@@ -70,16 +70,12 @@ jobs:
         run: |
           echo "---- wa-sqlite version (from package.json) ----"
           node -e "const p=require('./package.json'); console.log(p.dependencies?.['wa-sqlite'] || p.devDependencies?.['wa-sqlite'] || 'NOT FOUND');"
-
           echo ""
           echo "---- npm ls wa-sqlite ----"
           npm ls wa-sqlite || true
-
           echo ""
-          echo "---- storage.ts around failing line ----"
-          # Print a wider range so we catch line ~305 errors reliably
-          nl -ba src/lib/storage.ts | sed -n '260,340p' || true
-
+          echo "---- storage.ts excerpt ----"
+          nl -ba src/lib/storage.ts | sed -n '1,120p' || true
           echo ""
           echo "---- tsc version ----"
           npx tsc -v || true
