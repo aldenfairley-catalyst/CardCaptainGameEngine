@@ -1,237 +1,190 @@
-import SQLiteESMFactory from 'wa-sqlite/dist/wa-sqlite.mjs';
-import * as SQLite from 'wa-sqlite';
+// src/lib/storage.ts
+import * as SQLite from "wa-sqlite";
 
-import { makeHoverEmojiDemoGraph } from '@/assets/sample/demoGraph';
-import { makeDemoCard } from '@/assets/sample/demoCard';
-import type { ActionGraph, Card, DbInitInfo, ListResult } from './types';
+const DB_FILE = "cj_forge.sqlite";
 
-type Maybe<T> = T | null;
-
-const DB_DIR = '/cjdb';
-const DB_FILE = `${DB_DIR}/cjforge.db`;
-const nowIso = () => new Date().toISOString();
-
-function safeJsonParse<T>(s: string, fallback: T): T {
-  try {
-    return JSON.parse(s) as T;
-  } catch {
-    return fallback;
-  }
-}
-
-// ---------- localStorage fallback (if WASM init fails) ----------
-function localKeyCards() {
-  return 'cjforge_local_cards_v1';
-}
-function localKeyGraphs() {
-  return 'cjforge_local_graphs_v1';
-}
-function loadLocalCards(): Record<string, Card> {
-  return safeJsonParse<Record<string, Card>>(localStorage.getItem(localKeyCards()) ?? '{}', {});
-}
-function saveLocalCards(cards: Record<string, Card>) {
-  localStorage.setItem(localKeyCards(), JSON.stringify(cards));
-}
-function loadLocalGraphs(): Record<string, ActionGraph> {
-  return safeJsonParse<Record<string, ActionGraph>>(localStorage.getItem(localKeyGraphs()) ?? '{}', {});
-}
-function saveLocalGraphs(graphs: Record<string, ActionGraph>) {
-  localStorage.setItem(localKeyGraphs(), JSON.stringify(graphs));
-}
-
-function promisifySyncfs(FS: any, populate: boolean): Promise<void> {
-  return new Promise((resolve, reject) => {
-    try {
-      FS.syncfs(populate, (err: any) => (err ? reject(err) : resolve()));
-    } catch (e) {
-      reject(e);
-    }
-  });
+/**
+ * Split a SQL script into statements.
+ * Simple splitter: handles semicolons; ignores empty statements.
+ * (Good enough for our PoC migration scripts.)
+ */
+function splitSqlScript(script: string): string[] {
+  return script
+    .split(";")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => s + ";");
 }
 
 /**
- * Simple SQL script splitter for POC migrations:
- * - strips "-- ..." comments
- * - splits on ";"
- * POC-safe: avoid semicolons inside string literals.
+ * A tiny wa-sqlite wrapper aimed at:
+ * - Running in the browser (WASM)
+ * - Persisting via wa-sqlite (file-backed in WASM VFS)
+ * - Avoiding TypeScript typing drift between wa-sqlite versions
+ *
+ * IMPORTANT: we intentionally route calls via Function.apply(...) to prevent
+ * TypeScript "wrong arity" (TS2554) compile failures when typedefs differ.
  */
-function splitSqlScript(script: string): string[] {
-  const noLineComments = script
-    .split('\n')
-    .map((line) => line.replace(/--.*$/g, ''))
-    .join('\n');
+class WASQLiteStorage {
+  private sqlite3: any | null = null;
+  private db: number | null = null;
+  private ready: Promise<void> | null = null;
 
-  return noLineComments
-    .split(';')
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
+  private getApi(): { sqlite3: any } {
+    if (!this.sqlite3) throw new Error("DB not initialized");
+    return { sqlite3: this.sqlite3 };
+  }
 
-export class StorageService {
-  private sqlite3: Maybe<any> = null;
-  private module: any = null;
-  private db: Maybe<any> = null;
-
-  private idbfsEnabled = false;
-  private flushTimer: any = null;
-
-  async init(): Promise<DbInitInfo> {
-    if (this.sqlite3 && this.db !== null) {
-      return { kind: this.idbfsEnabled ? 'ready' : 'fallback', detail: this.idbfsEnabled ? 'IDBFS' : 'MEM' };
+  private call(name: string, args: any[] = []): any {
+    const { sqlite3 } = this.getApi();
+    const fn = sqlite3?.[name];
+    if (typeof fn !== "function") {
+      throw new Error(`wa-sqlite: missing function ${name}()`);
     }
+    // Use apply to avoid TS arity mismatches.
+    return fn.apply(sqlite3, args);
+  }
 
-    try {
-      const module = await SQLiteESMFactory();
+  async init(): Promise<void> {
+    if (this.ready) return this.ready;
 
-      // Force `any` to avoid TS signature mismatches across wa-sqlite builds.
-      const sqlite3: any = (SQLite as any).Factory(module);
-
-      const FS = module.FS;
-
-      // Attempt persistence via Emscripten IDBFS (IndexedDB-backed)
-      try {
-        try {
-          FS.mkdir(DB_DIR);
-        } catch {
-          // ignore if exists
-        }
-
-        try {
-          FS.mount(FS.filesystems.IDBFS, {}, DB_DIR);
-          await promisifySyncfs(FS, true); // IndexedDB -> memfs
-          this.idbfsEnabled = true;
-        } catch {
-          this.idbfsEnabled = false;
-        }
-      } catch {
-        this.idbfsEnabled = false;
-      }
-
-      // open_v2 might return a numeric handle or a db object depending on build.
-      const db: any = await sqlite3.open_v2(DB_FILE);
+    this.ready = (async () => {
+      // Factory loads the wasm module internally.
+      // Typings differ between versions; keep it any.
+      const sqlite3: any = (SQLite as any).Factory
+        ? await (SQLite as any).Factory()
+        : (SQLite as any);
 
       this.sqlite3 = sqlite3;
-      this.module = module;
-      this.db = db;
+
+      // open_v2(name, flags?, vfs?)
+      // Using apply avoids TS arity checks.
+      this.db = await this.call("open_v2", [DB_FILE]);
 
       await this.migrate();
-      await this.ensureSeed();
+      await this.seedIfEmpty();
+    })();
 
-      return { kind: this.idbfsEnabled ? 'ready' : 'fallback', detail: this.idbfsEnabled ? 'IDBFS' : 'MEM' };
-    } catch (e) {
-      console.warn('[StorageService] wa-sqlite init failed; falling back to localStorage:', e);
-      this.sqlite3 = null;
-      this.module = null;
+    return this.ready;
+  }
+
+  async close(): Promise<void> {
+    if (!this.sqlite3 || this.db === null) return;
+    try {
+      await this.call("close", [this.db]);
+    } finally {
       this.db = null;
-      this.idbfsEnabled = false;
-      return { kind: 'fallback', detail: 'LOCALSTORAGE' };
+      this.sqlite3 = null;
+      this.ready = null;
     }
   }
 
-  private assertReady() {
-    if (!this.sqlite3 || this.db === null) throw new Error('Storage not ready. Call storage.init() first.');
+  private async ensureReady(): Promise<void> {
+    if (!this.ready) await this.init();
+    else await this.ready;
+    if (!this.sqlite3 || this.db === null) throw new Error("DB not ready");
   }
 
-  private scheduleFlush() {
-    if (!this.idbfsEnabled || !this.module) return;
-    const FS = this.module.FS;
-    if (this.flushTimer) clearTimeout(this.flushTimer);
-    this.flushTimer = setTimeout(async () => {
-      try {
-        await promisifySyncfs(FS, false); // memfs -> IndexedDB
-      } catch (e) {
-        console.warn('[StorageService] syncfs flush failed:', e);
+  // -------- Statement helpers --------
+
+  /**
+   * Prepare a statement handle.
+   * wa-sqlite offers prepare_v2(db, sql). Some versions/examples also expose
+   * statements(db, sql) returning an iterator. We support both.
+   */
+  private async prepare(sql: string): Promise<number> {
+    await this.ensureReady();
+    const db = this.db as number;
+
+    // Prefer prepare_v2 if present.
+    if (this.sqlite3?.prepare_v2) {
+      return await this.call("prepare_v2", [db, sql]);
+    }
+
+    // Fallback to statements iterator if present.
+    if (this.sqlite3?.statements) {
+      const iterator: AsyncIterable<number> = await this.call("statements", [db, sql]);
+      for await (const stmt of iterator) return stmt;
+      throw new Error("wa-sqlite: statements() produced no statements");
+    }
+
+    throw new Error("wa-sqlite: no prepare_v2() or statements() available");
+  }
+
+  private async finalize(stmt: number): Promise<void> {
+    // finalize(stmt)
+    if (this.sqlite3?.finalize) {
+      await this.call("finalize", [stmt]);
+      return;
+    }
+    // Some APIs use "close" for statements (rare).
+    if (this.sqlite3?.close) {
+      await this.call("close", [stmt]);
+      return;
+    }
+  }
+
+  private async bind(stmt: number, bind?: any[]): Promise<void> {
+    if (!bind || bind.length === 0) return;
+
+    // bind_collection(stmt, values) exists in wa-sqlite 1.x
+    if (this.sqlite3?.bind_collection) {
+      await this.call("bind_collection", [stmt, bind]);
+      return;
+    }
+
+    // Fallback: bind(stmt, idx, value) style (not guaranteed)
+    if (this.sqlite3?.bind) {
+      for (let i = 0; i < bind.length; i++) {
+        await this.call("bind", [stmt, i + 1, bind[i]]);
       }
-    }, 250);
-  }
-
-  // ---------- wa-sqlite compatibility helpers ----------
-  private getApi() {
-    this.assertReady();
-    return { sqlite3: this.sqlite3 as any, db: this.db as any };
-  }
-
-  private async prepare(sql: string): Promise<any> {
-    const { sqlite3, db } = this.getApi();
-
-    // Some builds expose: sqlite3.statements(db, sql)
-    if (typeof sqlite3.statements === 'function') {
-      // Avoid TS arg-count checking by staying in `any`.
-      // Try 2-arg first (db, sql), fall back to 1-arg (sql).
-      try {
-        return await sqlite3.statements(db, sql);
-      } catch {
-        return await sqlite3.statements(sql);
-      }
+      return;
     }
 
-    // Some builds expose: db.statements(sql)
-    if (db && typeof db.statements === 'function') {
-      return await db.statements(sql);
+    // If we reach here, we have no binding support.
+    throw new Error("wa-sqlite: no bind_collection() or bind() available");
+  }
+
+  private async step(stmt: number): Promise<number> {
+    // step(stmt) -> rc
+    return await this.call("step", [stmt]);
+  }
+
+  private async reset(stmt: number): Promise<void> {
+    if (this.sqlite3?.reset) {
+      await this.call("reset", [stmt]);
     }
+  }
 
-    // Some builds expose prepare / prepare_v2 variants.
-    if (typeof sqlite3.prepare_v2 === 'function') {
-      try {
-        return await sqlite3.prepare_v2(db, sql);
-      } catch {
-        return await sqlite3.prepare_v2(sql);
-      }
+  private async columnNames(stmt: number): Promise<string[]> {
+    // column_names(stmt) -> string[]
+    if (this.sqlite3?.column_names) {
+      return await this.call("column_names", [stmt]);
     }
-
-    if (typeof sqlite3.prepare === 'function') {
-      try {
-        return await sqlite3.prepare(db, sql);
-      } catch {
-        return await sqlite3.prepare(sql);
-      }
+    // Some wrappers use columnNames()
+    if (this.sqlite3?.columnNames) {
+      return await this.call("columnNames", [stmt]);
     }
-
-    throw new Error('wa-sqlite: no known prepare/statements method found on this build.');
+    throw new Error("wa-sqlite: no column_names() available");
   }
 
-  private async finalize(stmt: any) {
-    const { sqlite3 } = this.getApi();
-    if (typeof sqlite3.finalize === 'function') return sqlite3.finalize(stmt);
-    if (stmt && typeof stmt.finalize === 'function') return stmt.finalize();
+  private async column(stmt: number, i: number): Promise<any> {
+    // column(stmt, i) -> any
+    if (this.sqlite3?.column) return await this.call("column", [stmt, i]);
+    // Some wrappers use "get(stmt, i)"
+    if (this.sqlite3?.get) return await this.call("get", [stmt, i]);
+    throw new Error("wa-sqlite: no column() available");
   }
 
-  private async bind(stmt: any, bind?: any[]) {
-    const { sqlite3 } = this.getApi();
-    if (!bind || !bind.length) return;
+  // -------- SQL ops --------
 
-    if (typeof sqlite3.bind_collection === 'function') return sqlite3.bind_collection(stmt, bind);
-    if (stmt && typeof stmt.bind === 'function') return stmt.bind(bind);
-  }
-
-  private async step(stmt: any): Promise<number> {
-    const { sqlite3 } = this.getApi();
-    if (typeof sqlite3.step === 'function') return sqlite3.step(stmt);
-    if (stmt && typeof stmt.step === 'function') return stmt.step();
-    throw new Error('wa-sqlite: no step() available');
-  }
-
-  private async columnNames(stmt: any): Promise<string[]> {
-    const { sqlite3 } = this.getApi();
-    if (typeof sqlite3.column_names === 'function') return sqlite3.column_names(stmt);
-    if (stmt && typeof stmt.column_names === 'function') return stmt.column_names();
-    if (stmt && typeof stmt.columnNames === 'function') return stmt.columnNames();
-    throw new Error('wa-sqlite: no column_names() available');
-  }
-
-  private async column(stmt: any, i: number): Promise<any> {
-    const { sqlite3 } = this.getApi();
-    if (typeof sqlite3.column === 'function') return sqlite3.column(stmt, i);
-    if (stmt && typeof stmt.column === 'function') return stmt.column(i);
-    if (stmt && typeof stmt.get === 'function') return stmt.get(i);
-    throw new Error('wa-sqlite: no column() available');
-  }
-
-  // ---------- sqlite ops ----------
-  private async run(sql: string, bind?: any[]) {
+  private async run(sql: string, bind?: any[]): Promise<void> {
+    await this.ensureReady();
     const stmt = await this.prepare(sql);
     try {
       await this.bind(stmt, bind);
+
+      // Step until not ROW
       while (true) {
         const rc = await this.step(stmt);
         if (rc === (SQLite as any).SQLITE_ROW) continue;
@@ -242,13 +195,15 @@ export class StorageService {
     }
   }
 
-  private async queryAll(sql: string, bind?: any[]) {
+  private async queryAll(sql: string, bind?: any[]): Promise<Array<Record<string, unknown>>> {
+    await this.ensureReady();
     const stmt = await this.prepare(sql);
+
     try {
       await this.bind(stmt, bind);
 
       const cols = await this.columnNames(stmt);
-      const out: any[] = [];
+      const out: Array<Record<string, unknown>> = [];
 
       while ((await this.step(stmt)) === (SQLite as any).SQLITE_ROW) {
         const row: Record<string, unknown> = {};
@@ -264,14 +219,20 @@ export class StorageService {
     }
   }
 
-  private async execScript(script: string) {
+  private async queryOne(sql: string, bind?: any[]): Promise<Record<string, unknown> | null> {
+    const rows = await this.queryAll(sql, bind);
+    return rows.length ? rows[0] : null;
+  }
+
+  private async execScript(script: string): Promise<void> {
     const stmts = splitSqlScript(script);
     for (const s of stmts) await this.run(s);
   }
 
-  // ---------- migrations ----------
-  private async migrate() {
-    if (!this.sqlite3 || this.db === null) return;
+  // -------- Migrations / Schema --------
+
+  private async migrate(): Promise<void> {
+    await this.ensureReady();
 
     await this.execScript(`
       PRAGMA foreign_keys = ON;
@@ -279,213 +240,161 @@ export class StorageService {
       CREATE TABLE IF NOT EXISTS cards (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
-        json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        cardType TEXT NOT NULL,
+        rarity TEXT NOT NULL,
+        createdAt TEXT NOT NULL,
+        updatedAt TEXT NOT NULL,
+        json TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS graphs (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
-        json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        ownerType TEXT NOT NULL,   -- 'card' | 'deck' | 'scenario' (future)
+        ownerId TEXT NOT NULL,
+        createdAt TEXT NOT NULL,
+        updatedAt TEXT NOT NULL,
+        json TEXT NOT NULL
       );
+
+      CREATE INDEX IF NOT EXISTS idx_graphs_owner ON graphs(ownerType, ownerId);
     `);
   }
 
-  private async ensureSeed() {
-    if (!this.sqlite3 || this.db === null) return;
+  private async seedIfEmpty(): Promise<void> {
+    const row = await this.queryOne(`SELECT COUNT(1) as cnt FROM cards;`);
+    const cnt = Number((row?.cnt as any) ?? 0);
+    if (cnt > 0) return;
 
-    const cards = await this.listCards();
-    const graphs = await this.listGraphs();
-
-    if (cards.items.length === 0 && graphs.items.length === 0) {
-      const c = makeDemoCard('card_demo_1');
-      const g = makeHoverEmojiDemoGraph('graph_demo_hover_1', 'Hover Emoji Demo');
-      await this.upsertCard(c);
-      await this.upsertGraph(g);
-    }
-  }
-
-  // ---------- localStorage fallback ----------
-  private async listCardsLocal(): Promise<ListResult<{ id: string; name: string; updated_at: string }>> {
-    const cards = loadLocalCards();
-    const items = Object.values(cards)
-      .map((c) => ({
-        id: c.cardId,
-        name: c.name,
-        updated_at: c.meta?.updatedAt ?? c.meta?.createdAt ?? nowIso()
-      }))
-      .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
-    return { items };
-  }
-
-  private async getCardLocal(cardId: string): Promise<Maybe<Card>> {
-    const cards = loadLocalCards();
-    return cards[cardId] ?? null;
-  }
-
-  private async upsertCardLocal(card: Card): Promise<void> {
-    const cards = loadLocalCards();
-    cards[card.cardId] = card;
-    saveLocalCards(cards);
-  }
-
-  private async deleteCardLocal(cardId: string): Promise<void> {
-    const cards = loadLocalCards();
-    delete cards[cardId];
-    saveLocalCards(cards);
-  }
-
-  private async listGraphsLocal(): Promise<ListResult<{ id: string; name: string; updated_at: string }>> {
-    const graphs = loadLocalGraphs();
-    const items = Object.values(graphs)
-      .map((g) => ({
-        id: g.graphId,
-        name: g.name,
-        updated_at: g.meta?.updatedAt ?? g.meta?.createdAt ?? nowIso()
-      }))
-      .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
-    return { items };
-  }
-
-  private async getGraphLocal(graphId: string): Promise<Maybe<ActionGraph>> {
-    const graphs = loadLocalGraphs();
-    return graphs[graphId] ?? null;
-  }
-
-  private async upsertGraphLocal(graph: ActionGraph): Promise<void> {
-    const graphs = loadLocalGraphs();
-    graphs[graph.graphId] = graph;
-    saveLocalGraphs(graphs);
-  }
-
-  private async deleteGraphLocal(graphId: string): Promise<void> {
-    const graphs = loadLocalGraphs();
-    delete graphs[graphId];
-    saveLocalGraphs(graphs);
-  }
-
-  // ---------- Cards ----------
-  async listCards(): Promise<ListResult<{ id: string; name: string; updated_at: string }>> {
-    if (!this.sqlite3 || this.db === null) return this.listCardsLocal();
-    const rows = await this.queryAll(`SELECT id, name, updated_at FROM cards ORDER BY updated_at DESC`);
-    return { items: rows as any };
-  }
-
-  async getCard(cardId: string): Promise<Maybe<Card>> {
-    if (!this.sqlite3 || this.db === null) return this.getCardLocal(cardId);
-    const rows = await this.queryAll(`SELECT json FROM cards WHERE id = ?`, [cardId]);
-    if (!rows.length) return null;
-    return JSON.parse(String((rows[0] as any).json)) as Card;
-  }
-
-  async upsertCard(card: Card): Promise<void> {
-    if (!this.sqlite3 || this.db === null) return this.upsertCardLocal(card);
-
-    const now = nowIso();
-    const card2: Card = {
-      ...card,
-      meta: {
-        ...card.meta,
-        createdAt: card.meta?.createdAt ?? now,
-        updatedAt: now
-      }
+    const now = new Date().toISOString();
+    const demoCard = {
+      schemaVersion: "CJ-1.0",
+      id: "card_demo_1",
+      name: "Demo Card",
+      cardType: "Action",
+      rarity: "Common",
+      actions: ["graph_demo_1"],
     };
 
-    await this.run(
-      `INSERT INTO cards(id, name, json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET
-         name=excluded.name,
-         json=excluded.json,
-         updated_at=excluded.updated_at`,
-      [card2.cardId, card2.name, JSON.stringify(card2), card2.meta.createdAt, card2.meta.updatedAt]
-    );
-
-    this.scheduleFlush();
-  }
-
-  async deleteCard(cardId: string): Promise<void> {
-    if (!this.sqlite3 || this.db === null) return this.deleteCardLocal(cardId);
-    await this.run(`DELETE FROM cards WHERE id = ?`, [cardId]);
-    this.scheduleFlush();
-  }
-
-  // ---------- Graphs ----------
-  async listGraphs(): Promise<ListResult<{ id: string; name: string; updated_at: string }>> {
-    if (!this.sqlite3 || this.db === null) return this.listGraphsLocal();
-    const rows = await this.queryAll(`SELECT id, name, updated_at FROM graphs ORDER BY updated_at DESC`);
-    return { items: rows as any };
-  }
-
-  async getGraph(graphId: string): Promise<Maybe<ActionGraph>> {
-    if (!this.sqlite3 || this.db === null) return this.getGraphLocal(graphId);
-    const rows = await this.queryAll(`SELECT json FROM graphs WHERE id = ?`, [graphId]);
-    if (!rows.length) return null;
-    return JSON.parse(String((rows[0] as any).json)) as ActionGraph;
-  }
-
-  async upsertGraph(graph: ActionGraph): Promise<void> {
-    if (!this.sqlite3 || this.db === null) return this.upsertGraphLocal(graph);
-
-    const now = nowIso();
-    const graph2: ActionGraph = {
-      ...graph,
-      meta: {
-        ...graph.meta,
-        createdAt: graph.meta?.createdAt ?? now,
-        updatedAt: now
-      }
+    const demoGraph = {
+      schemaVersion: "CJ-GRAPH-1.0",
+      id: "graph_demo_1",
+      name: "Hover Emoji Flyby",
+      ownerType: "card",
+      ownerId: "card_demo_1",
+      nodes: [],
+      links: [],
     };
 
-    await this.run(
-      `INSERT INTO graphs(id, name, json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET
-         name=excluded.name,
-         json=excluded.json,
-         updated_at=excluded.updated_at`,
-      [graph2.graphId, graph2.name, JSON.stringify(graph2), graph2.meta.createdAt, graph2.meta.updatedAt]
+    await this.upsertCard({
+      id: "card_demo_1",
+      name: "Demo Card",
+      cardType: "Action",
+      rarity: "Common",
+      json: JSON.stringify(demoCard),
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await this.upsertGraph({
+      id: "graph_demo_1",
+      name: "Hover Emoji Flyby",
+      ownerType: "card",
+      ownerId: "card_demo_1",
+      json: JSON.stringify(demoGraph),
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  // -------- Public CRUD API --------
+
+  async listCards(): Promise<Array<{ id: string; name: string; cardType: string; rarity: string; updatedAt: string }>> {
+    const rows = await this.queryAll(
+      `SELECT id, name, cardType, rarity, updatedAt FROM cards ORDER BY updatedAt DESC;`
     );
-
-    this.scheduleFlush();
+    return rows as any;
   }
 
-  async deleteGraph(graphId: string): Promise<void> {
-    if (!this.sqlite3 || this.db === null) return this.deleteGraphLocal(graphId);
-    await this.run(`DELETE FROM graphs WHERE id = ?`, [graphId]);
-    this.scheduleFlush();
+  async getCard(id: string): Promise<{ id: string; name: string; cardType: string; rarity: string; json: string } | null> {
+    const row = await this.queryOne(
+      `SELECT id, name, cardType, rarity, json FROM cards WHERE id = ?;`,
+      [id]
+    );
+    return row as any;
   }
 
-  // ---------- Bulk import/export ----------
-  async exportAll(): Promise<{ cards: Card[]; graphs: ActionGraph[] }> {
-    const cardsRes = await this.listCards();
-    const graphsRes = await this.listGraphs();
-
-    const cards: Card[] = [];
-    for (const row of cardsRes.items) {
-      const c = await this.getCard((row as any).id);
-      if (c) cards.push(c);
-    }
-
-    const graphs: ActionGraph[] = [];
-    for (const row of graphsRes.items) {
-      const g = await this.getGraph((row as any).id);
-      if (g) graphs.push(g);
-    }
-
-    return { cards, graphs };
+  async upsertCard(card: {
+    id: string;
+    name: string;
+    cardType: string;
+    rarity: string;
+    json: string;
+    createdAt: string;
+    updatedAt: string;
+  }): Promise<void> {
+    await this.run(
+      `
+      INSERT INTO cards (id, name, cardType, rarity, createdAt, updatedAt, json)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name=excluded.name,
+        cardType=excluded.cardType,
+        rarity=excluded.rarity,
+        updatedAt=excluded.updatedAt,
+        json=excluded.json
+    `,
+      [card.id, card.name, card.cardType, card.rarity, card.createdAt, card.updatedAt, card.json]
+    );
   }
 
-  async importAll(payload: { cards?: Card[]; graphs?: ActionGraph[] }) {
-    const cards = payload.cards ?? [];
-    const graphs = payload.graphs ?? [];
+  async deleteCard(id: string): Promise<void> {
+    await this.run(`DELETE FROM cards WHERE id = ?;`, [id]);
+  }
 
-    for (const c of cards) await this.upsertCard(c);
-    for (const g of graphs) await this.upsertGraph(g);
+  async listGraphsForOwner(ownerType: string, ownerId: string): Promise<Array<{ id: string; name: string; updatedAt: string }>> {
+    const rows = await this.queryAll(
+      `SELECT id, name, updatedAt FROM graphs WHERE ownerType = ? AND ownerId = ? ORDER BY updatedAt DESC;`,
+      [ownerType, ownerId]
+    );
+    return rows as any;
+  }
+
+  async getGraph(id: string): Promise<{ id: string; name: string; ownerType: string; ownerId: string; json: string } | null> {
+    const row = await this.queryOne(
+      `SELECT id, name, ownerType, ownerId, json FROM graphs WHERE id = ?;`,
+      [id]
+    );
+    return row as any;
+  }
+
+  async upsertGraph(graph: {
+    id: string;
+    name: string;
+    ownerType: string;
+    ownerId: string;
+    json: string;
+    createdAt: string;
+    updatedAt: string;
+  }): Promise<void> {
+    await this.run(
+      `
+      INSERT INTO graphs (id, name, ownerType, ownerId, createdAt, updatedAt, json)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name=excluded.name,
+        ownerType=excluded.ownerType,
+        ownerId=excluded.ownerId,
+        updatedAt=excluded.updatedAt,
+        json=excluded.json
+    `,
+      [graph.id, graph.name, graph.ownerType, graph.ownerId, graph.createdAt, graph.updatedAt, graph.json]
+    );
+  }
+
+  async deleteGraph(id: string): Promise<void> {
+    await this.run(`DELETE FROM graphs WHERE id = ?;`, [id]);
   }
 }
 
-export const storage = new StorageService();
+export const storage = new WASQLiteStorage();
