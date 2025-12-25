@@ -12,11 +12,12 @@ permissions:
 jobs:
   build-test:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # IMPORTANT: no cache here unless you commit a lockfile
+      # IMPORTANT: No npm cache unless you commit a lockfile.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -49,22 +50,39 @@ jobs:
       - name: Test (if present)
         run: npm run test --if-present
 
-      - name: Diagnostics (wa-sqlite + storage excerpt)
+      - name: Diagnostics (env + repo)
+        shell: bash
+        run: |
+          echo "PWD: $(pwd)"
+          echo ""
+          echo "Top-level files:"
+          ls -la
+          echo ""
+          echo "Node / npm:"
+          node -v
+          npm -v
+          echo ""
+          echo "Lockfiles:"
+          find . -maxdepth 3 -type f \( -name "package-lock.json" -o -name "npm-shrinkwrap.json" -o -name "yarn.lock" -o -name "pnpm-lock.yaml" \) -print || true
+
+      - name: Diagnostics (deps + wa-sqlite + storage hot zone)
+        shell: bash
         run: |
           echo "---- wa-sqlite version (from package.json) ----"
-          node -e "const p=require('./package.json'); console.log(p.dependencies?.['wa-sqlite'] || p.devDependencies?.['wa-sqlite'] || 'NOT FOUND')"
+          node -e "const p=require('./package.json'); console.log(p.dependencies?.['wa-sqlite'] || p.devDependencies?.['wa-sqlite'] || 'NOT FOUND');"
+
           echo ""
           echo "---- npm ls wa-sqlite ----"
           npm ls wa-sqlite || true
 
           echo ""
-          echo "---- wa-sqlite type signatures (grep) ----"
-          grep -R "statements" node_modules/wa-sqlite -n | head -n 40 || true
-          grep -R "open_v2" node_modules/wa-sqlite -n | head -n 40 || true
+          echo "---- storage.ts around failing line ----"
+          # Print a wider range so we catch line ~305 errors reliably
+          nl -ba src/lib/storage.ts | sed -n '260,340p' || true
 
           echo ""
-          echo "---- storage.ts excerpt (line numbers) ----"
-          nl -ba src/lib/storage.ts | sed -n '200,280p' || true
+          echo "---- tsc version ----"
+          npx tsc -v || true
 
       - name: Build
         run: npm run build
